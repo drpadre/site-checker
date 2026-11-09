@@ -1,0 +1,22 @@
+[package]
+name = "site-checker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+teloxide = { version = "0.17", default-features = false, features = ["rustls", "throttle"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "charset"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+chrono = "0.4"
+url = "2"
+encoding_rs = "0.8"
+
+[profile.release]
+lto = "thin"
+strip = true

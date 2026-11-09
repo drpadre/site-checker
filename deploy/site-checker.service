@@ -1,0 +1,23 @@
+[Unit]
+Description=Site Checker Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sitechecker
+Group=sitechecker
+WorkingDirectory=/opt/site-checker
+EnvironmentFile=/opt/site-checker/.env
+ExecStart=/opt/site-checker/site-checker
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/site-checker/data
+
+[Install]
+WantedBy=multi-user.target
