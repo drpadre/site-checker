@@ -162,6 +162,7 @@ pub async fn handle(bot: &TBot, state: &AppState, sender: i64, chat: i64, msg_id
             return Ok(());
         }
         db::set_banned(&state.db, id, true).await?;
+        db::delete_notifications_for_user(&state.db, id).await?;
         return user_card(bot, state, chat, mid, id).await;
     }
     if let Some(id) = parse_id(data, "unban:") {

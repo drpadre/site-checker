@@ -87,7 +87,7 @@ pub async fn site_list(bot: &TBot, state: &AppState, chat: i64, msg_id: Option<M
 
 fn site_card_text(site: &Site) -> String {
     let mut text = format!(
-        "🌐 <b>{}</b>\n\n{} Статус: {}\n🔎 Текст: {}\n⏱ Интервал: {}",
+        "🌐 <b>{}</b>\n\n{} Статус: {}\n🔎 Текст: {}\n⏱ Интервал: {}\n🔔 Напоминания: {}\n🐌 Порог задержки: {}",
         ui::esc(&site.url),
         ui::status_emoji(site),
         ui::status_text(site),
@@ -96,6 +96,8 @@ fn site_card_text(site: &Site) -> String {
             None => "не задан (только HTTP-статус)".into(),
         },
         ui::fmt_interval(site.interval_secs),
+        ui::fmt_reminder(site.reminder_secs),
+        ui::fmt_latency_threshold(site.latency_threshold_ms),
     );
     text += &format!(
         "\n🕐 Последняя проверка: {}",
@@ -123,7 +125,44 @@ pub async fn site_card(bot: &TBot, state: &AppState, chat: i64, msg_id: Option<M
     let Some(site) = owned_site(state, eff, site_id).await? else {
         return deny(bot, chat, msg_id).await;
     };
-    ui::show(bot, chat, msg_id, site_card_text(&site), ui::site_card_kb(&site)).await;
+    let mut text = site_card_text(&site);
+    let since24 = db::after_secs_str(-86400);
+    let since7d = db::after_secs_str(-7 * 86400);
+    let (t24, u24) = db::site_uptime(&state.db, site.id, &since24).await?;
+    let (t7, u7) = db::site_uptime(&state.db, site.id, &since7d).await?;
+    let p24 = ui::uptime_percent(t24, u24).unwrap_or_else(|| "нет данных".into());
+    let p7 = ui::uptime_percent(t7, u7).unwrap_or_else(|| "нет данных".into());
+    text += &format!("\n📈 Uptime: {p24} за 24ч · {p7} за 7д");
+    if let Some(ms) = db::site_avg_latency(&state.db, site.id, &since24).await? {
+        text += &format!("\n⏱ Средняя задержка (24ч): {ms} мс");
+    }
+    ui::show(bot, chat, msg_id, text, ui::site_card_kb(&site)).await;
+    Ok(())
+}
+
+pub async fn site_history(bot: &TBot, state: &AppState, chat: i64, msg_id: Option<MessageId>, sender: i64, site_id: i64) -> Result<()> {
+    let eff = state.effective_user(sender).await;
+    let Some(site) = owned_site(state, eff, site_id).await? else {
+        return deny(bot, chat, msg_id).await;
+    };
+    let incidents = db::list_incidents(&state.db, site.id, 10).await?;
+    let mut text = format!("📜 <b>История</b> — {}\n\n", ui::esc(&site.url));
+    if incidents.is_empty() {
+        text += "Инцидентов пока не было.";
+    } else {
+        text += "Последние инциденты (новые сверху):\n\n";
+        for inc in &incidents {
+            let start = ui::fmt_dt(&inc.started_at);
+            let duration = ui::fmt_duration(&inc.started_at, inc.ended_at.as_deref());
+            let end = match &inc.ended_at {
+                Some(e) => ui::fmt_dt(e),
+                None => "ещё длится".into(),
+            };
+            let reason = inc.reason.as_deref().map(ui::esc).unwrap_or_else(|| "—".into());
+            text += &format!("🔴 {start} → {end} ({duration})\nПричина: {reason}\n\n");
+        }
+    }
+    ui::show(bot, chat, msg_id, text, ui::back_kb(&format!("site:{site_id}"))).await;
     Ok(())
 }
 
@@ -324,6 +363,9 @@ pub async fn handle(bot: &TBot, state: &AppState, sender: i64, chat: i64, msg_id
     if let Some(id) = parse_id(data, "chk:") {
         return check_now(bot, state, chat, mid, sender, id).await;
     }
+    if let Some(id) = parse_id(data, "hist:") {
+        return site_history(bot, state, chat, mid, sender, id).await;
+    }
 
     let eff = state.effective_user(sender).await;
     if let Some(id) = parse_id(data, "eurl:") {
@@ -367,6 +409,74 @@ pub async fn handle(bot: &TBot, state: &AppState, sender: i64, chat: i64, msg_id
         db::update_site_interval(&state.db, id, secs).await?;
         return site_card(bot, state, chat, mid, sender, id).await;
     }
+    if let Some(id) = parse_id(data, "rem:") {
+        let Some(site) = owned_site(state, eff, id).await? else {
+            return deny(bot, chat, mid).await;
+        };
+        ui::show(
+            bot,
+            chat,
+            mid,
+            format!(
+                "🔔 <b>Напоминания о простое</b>\n\nТекущие: {}\n\nКак часто напоминать, пока сайт недоступен?",
+                ui::fmt_reminder(site.reminder_secs)
+            ),
+            ui::reminder_kb(id),
+        )
+        .await;
+        return Ok(());
+    }
+    if let Some(rest) = data.strip_prefix("remset:") {
+        let (id, secs) = match rest.split_once(':') {
+            Some((id, secs)) => match (id.parse::<i64>(), secs.parse::<i64>()) {
+                (Ok(id), Ok(secs)) => (id, secs),
+                _ => return Ok(()),
+            },
+            None => return Ok(()),
+        };
+        if owned_site(state, eff, id).await?.is_none() {
+            return deny(bot, chat, mid).await;
+        }
+        if !ui::REMINDERS.iter().any(|(s, _)| *s == secs) {
+            return Ok(());
+        }
+        db::set_site_reminder(&state.db, id, secs).await?;
+        return site_card(bot, state, chat, mid, sender, id).await;
+    }
+    if let Some(id) = parse_id(data, "lat:") {
+        let Some(site) = owned_site(state, eff, id).await? else {
+            return deny(bot, chat, mid).await;
+        };
+        ui::show(
+            bot,
+            chat,
+            mid,
+            format!(
+                "🐌 <b>Порог задержки</b>\n\nТекущий: {}\n\nБот предупредит, если сайт ответит медленнее этого времени (один раз за эпизод).",
+                ui::fmt_latency_threshold(site.latency_threshold_ms)
+            ),
+            ui::latency_kb(id),
+        )
+        .await;
+        return Ok(());
+    }
+    if let Some(rest) = data.strip_prefix("latset:") {
+        let (id, ms) = match rest.split_once(':') {
+            Some((id, ms)) => match (id.parse::<i64>(), ms.parse::<i64>()) {
+                (Ok(id), Ok(ms)) => (id, ms),
+                _ => return Ok(()),
+            },
+            None => return Ok(()),
+        };
+        if owned_site(state, eff, id).await?.is_none() {
+            return deny(bot, chat, mid).await;
+        }
+        if !ui::LATENCY_THRESHOLDS.iter().any(|(s, _)| *s == ms) {
+            return Ok(());
+        }
+        db::set_site_latency_threshold(&state.db, id, ms).await?;
+        return site_card(bot, state, chat, mid, sender, id).await;
+    }
     if let Some(id) = parse_id(data, "tog:") {
         let Some(site) = owned_site(state, eff, id).await? else {
             return deny(bot, chat, mid).await;
@@ -404,6 +514,19 @@ pub async fn handle(bot: &TBot, state: &AppState, sender: i64, chat: i64, msg_id
         if !ui::INTERVALS.iter().any(|(s, _)| *s == secs) {
             return Ok(());
         }
+        let limit = state.cfg.max_sites_per_user;
+        if limit > 0 && db::count_sites(&state.db, for_user).await? >= limit {
+            state.dialogs.lock().await.remove(&sender);
+            ui::show(
+                bot,
+                chat,
+                mid,
+                format!("⚠️ Достигнут лимит: {limit} сайтов на пользователя. Удалите ненужные сайты, чтобы добавить новые."),
+                ui::main_menu_kb(state.cfg.is_admin(sender), false),
+            )
+            .await;
+            return Ok(());
+        }
         match db::add_site(&state.db, for_user, &url, text.as_deref(), secs).await {
             Err(e) => {
                 tracing::error!("add_site: {e:#}");
@@ -419,4 +542,19 @@ pub async fn handle(bot: &TBot, state: &AppState, sender: i64, chat: i64, msg_id
     }
 
     main_menu(bot, state, chat, mid, sender).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_id_prefix() {
+        assert_eq!(parse_id("site:42", "site:"), Some(42));
+        assert_eq!(parse_id("chk:7", "chk:"), Some(7));
+        assert_eq!(parse_id("hist:100", "hist:"), Some(100));
+        assert_eq!(parse_id("site:abc", "site:"), None);
+        assert_eq!(parse_id("other:42", "site:"), None);
+        assert_eq!(parse_id("site:", "site:"), None);
+    }
 }

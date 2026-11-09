@@ -15,6 +15,23 @@ pub const INTERVALS: [(i64, &str); 6] = [
     (86400, "24 часа"),
 ];
 
+pub const REMINDERS: [(i64, &str); 5] = [
+    (0, "Выкл"),
+    (3600, "1 час"),
+    (21600, "6 часов"),
+    (43200, "12 часов"),
+    (86400, "24 часа"),
+];
+
+pub const LATENCY_THRESHOLDS: [(i64, &str); 6] = [
+    (0, "Выкл"),
+    (300, "300 мс"),
+    (500, "500 мс"),
+    (1000, "1 с"),
+    (2000, "2 с"),
+    (5000, "5 с"),
+];
+
 pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -43,11 +60,29 @@ pub fn fmt_interval(secs: i64) -> String {
     }
 }
 
-pub fn fmt_ago(ts: &str) -> String {
-    let Some(dt) = db::parse_ts(ts) else {
-        return "неизвестно".into();
-    };
-    let secs = (chrono::Utc::now() - dt).num_seconds().max(0);
+pub fn fmt_reminder(secs: i64) -> String {
+    match secs {
+        s if s <= 0 => "выключены".into(),
+        3600 => "каждый час".into(),
+        21600 => "каждые 6 часов".into(),
+        43200 => "каждые 12 часов".into(),
+        86400 => "каждые 24 часа".into(),
+        _ => format!("каждые {secs} с"),
+    }
+}
+
+pub fn fmt_latency_threshold(ms: i64) -> String {
+    if ms <= 0 {
+        "выключен".into()
+    } else if ms < 1000 {
+        format!("{ms} мс")
+    } else {
+        format!("{} с", ms / 1000)
+    }
+}
+
+pub fn fmt_secs(secs: i64) -> String {
+    let secs = secs.max(0);
     if secs < 60 {
         format!("{secs} сек")
     } else if secs < 3600 {
@@ -57,6 +92,30 @@ pub fn fmt_ago(ts: &str) -> String {
     } else {
         format!("{} дн {} ч", secs / 86400, (secs % 86400) / 3600)
     }
+}
+
+pub fn fmt_ago(ts: &str) -> String {
+    let Some(dt) = db::parse_ts(ts) else {
+        return "неизвестно".into();
+    };
+    fmt_secs((chrono::Utc::now() - dt).num_seconds())
+}
+
+/// Длительность между start и end (если end нет — по текущий момент).
+pub fn fmt_duration(start: &str, end: Option<&str>) -> String {
+    let Some(s) = db::parse_ts(start) else {
+        return "неизвестно".into();
+    };
+    let e = end.and_then(db::parse_ts).unwrap_or_else(chrono::Utc::now);
+    fmt_secs((e - s).num_seconds())
+}
+
+/// Доля успешных проверок в процентах; None если проверок не было.
+pub fn uptime_percent(total: i64, up: i64) -> Option<String> {
+    if total <= 0 {
+        return None;
+    }
+    Some(format!("{:.1}%", (up as f64 / total as f64) * 100.0))
 }
 
 pub fn status_emoji(site: &Site) -> &'static str {
@@ -132,6 +191,34 @@ pub fn interval_kb(prefix: &str, back_data: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(rows)
 }
 
+pub fn reminder_kb(site_id: i64) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = REMINDERS
+        .chunks(3)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(secs, label)| btn(*label, format!("remset:{site_id}:{secs}")))
+                .collect()
+        })
+        .collect();
+    rows.push(vec![btn("⬅️ Назад", format!("site:{site_id}"))]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn latency_kb(site_id: i64) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = LATENCY_THRESHOLDS
+        .chunks(3)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(ms, label)| btn(*label, format!("latset:{site_id}:{ms}")))
+                .collect()
+        })
+        .collect();
+    rows.push(vec![btn("⬅️ Назад", format!("site:{site_id}"))]);
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub fn site_card_kb(site: &Site) -> InlineKeyboardMarkup {
     let id = site.id;
     let toggle = if site.enabled {
@@ -145,6 +232,11 @@ pub fn site_card_kb(site: &Site) -> InlineKeyboardMarkup {
             btn("✏️ URL", format!("eurl:{id}")),
             btn("📝 Текст", format!("etxt:{id}")),
             btn("⏱ Интервал", format!("eint:{id}")),
+        ],
+        vec![
+            btn("📜 История", format!("hist:{id}")),
+            btn("🔔 Напоминания", format!("rem:{id}")),
+            btn("🐌 Задержка", format!("lat:{id}")),
         ],
         vec![toggle, btn("🗑 Удалить", format!("del:{id}"))],
         vec![btn("⬅️ К списку", "sites")],
@@ -222,5 +314,67 @@ pub async fn send(bot: &TBot, chat: i64, text: String, kb: Option<InlineKeyboard
     }
     if let Err(e) = req.await {
         tracing::warn!("send_message to {chat} failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn esc_html() {
+        assert_eq!(esc("a<b>&c"), "a&lt;b&gt;&amp;c");
+        assert_eq!(esc("plain"), "plain");
+    }
+
+    #[test]
+    fn interval_labels() {
+        assert_eq!(fmt_interval(300), "каждые 5 минут");
+        assert_eq!(fmt_interval(3600), "каждый час");
+        assert_eq!(fmt_interval(7200), "каждые 2 ч");
+        assert_eq!(fmt_interval(120), "каждые 2 мин");
+        assert_eq!(fmt_interval(45), "каждые 45 сек");
+    }
+
+    #[test]
+    fn secs_formatting() {
+        assert_eq!(fmt_secs(30), "30 сек");
+        assert_eq!(fmt_secs(90), "1 мин");
+        assert_eq!(fmt_secs(3660), "1 ч 1 мин");
+        assert_eq!(fmt_secs(90000), "1 дн 1 ч");
+        assert_eq!(fmt_secs(-5), "0 сек");
+    }
+
+    #[test]
+    fn duration_between() {
+        let start = "2026-11-09T10:00:00.000Z";
+        let end = "2026-11-09T11:30:00.000Z";
+        assert_eq!(fmt_duration(start, Some(end)), "1 ч 30 мин");
+        assert_eq!(fmt_duration("invalid", Some(end)), "неизвестно");
+    }
+
+    #[test]
+    fn uptime_pct() {
+        assert_eq!(uptime_percent(0, 0), None);
+        assert_eq!(uptime_percent(4, 3).unwrap(), "75.0%");
+        assert_eq!(uptime_percent(2, 2).unwrap(), "100.0%");
+    }
+
+    #[test]
+    fn short_url_host() {
+        assert_eq!(short_url("https://example.com/path"), "example.com");
+        let long = format!("https://{}.com/", "a".repeat(40));
+        let s = short_url(&long);
+        assert!(s.chars().count() <= 30);
+        assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn reminder_and_latency_labels() {
+        assert_eq!(fmt_reminder(0), "выключены");
+        assert_eq!(fmt_reminder(3600), "каждый час");
+        assert_eq!(fmt_latency_threshold(0), "выключен");
+        assert_eq!(fmt_latency_threshold(500), "500 мс");
+        assert_eq!(fmt_latency_threshold(2000), "2 с");
     }
 }

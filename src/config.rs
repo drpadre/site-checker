@@ -12,6 +12,10 @@ pub struct Config {
     pub http_timeout_secs: u64,
     pub max_concurrent_checks: usize,
     pub failure_threshold: i64,
+    pub max_sites_per_user: i64,
+    pub backup_dir: String,
+    pub backup_interval_hours: u64,
+    pub backup_keep: usize,
 }
 
 fn var(key: &str, default: &str) -> String {
@@ -49,12 +53,22 @@ impl Config {
             http_timeout_secs: parse_num("HTTP_TIMEOUT_SECONDS", "15")?,
             max_concurrent_checks: parse_num("MAX_CONCURRENT_CHECKS", "10")?,
             failure_threshold: parse_num("FAILURE_THRESHOLD", "1")?,
+            max_sites_per_user: parse_num("MAX_SITES_PER_USER", "50")?,
+            backup_dir: var("BACKUP_DIR", "data/backups"),
+            backup_interval_hours: parse_num("BACKUP_INTERVAL_HOURS", "24")?,
+            backup_keep: parse_num("BACKUP_KEEP", "7")?,
         };
         if cfg.tick_secs == 0 || cfg.http_timeout_secs == 0 || cfg.max_concurrent_checks == 0 {
             bail!("CHECK_TICK_SECONDS, HTTP_TIMEOUT_SECONDS и MAX_CONCURRENT_CHECKS должны быть > 0");
         }
         if cfg.failure_threshold < 1 {
             bail!("FAILURE_THRESHOLD должен быть >= 1");
+        }
+        if cfg.max_sites_per_user < 0 {
+            bail!("MAX_SITES_PER_USER должен быть >= 0 (0 — без лимита)");
+        }
+        if cfg.backup_interval_hours == 0 {
+            bail!("BACKUP_INTERVAL_HOURS должен быть >= 1");
         }
         Ok(cfg)
     }
