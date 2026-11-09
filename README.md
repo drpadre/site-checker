@@ -64,7 +64,35 @@ journalctl -u site-checker -f
 
 Unit уже настроен: автоперезапуск, отдельный пользователь, `ProtectSystem=strict` с записью только в `data/`, корректная остановка по SIGTERM.
 
-### Обновление
+### Обновление через GitHub Releases
+
+При пуше тега `v*` GitHub Actions прогоняет тесты, собирает release-бинарь (ubuntu-24.04, glibc совместим с Debian 12+/Ubuntu 24.04+) и публикует его в Releases вместе с `SHA256SUMS`.
+
+Выпуск новой версии:
+
+```bash
+# поднять version в Cargo.toml, закоммитить
+git tag v0.1.1 && git push origin v0.1.1
+```
+
+Однократная подготовка сервера:
+
+```bash
+apt-get install -y curl jq
+scp deploy/update.sh root@SERVER:/opt/site-checker/update.sh
+ssh root@SERVER 'chmod +x /opt/site-checker/update.sh'
+```
+
+Обновление на сервере:
+
+```bash
+/opt/site-checker/update.sh           # до последнего релиза
+/opt/site-checker/update.sh --force   # переустановить текущий
+```
+
+Скрипт проверяет sha256, останавливает сервис, заменяет бинарь, запускает и автоматически откатывается на предыдущую версию, если сервис не поднялся. Миграции БД применяются приложением при старте.
+
+Запасной вариант без CI — собрать локально и залить вручную:
 
 ```bash
 cargo build --release
